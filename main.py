@@ -370,7 +370,40 @@ async def get_contact(contact_id: int):
             detail="Error fetching contact"
         )
 
+@app.delete("/api/contacts/{contact_id}")
+async def delete_contact(contact_id: int):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
 
+        cur.execute(
+            "DELETE FROM contact_us WHERE id = %s RETURNING id",
+            (contact_id,)
+        )
+
+        deleted_contact = cur.fetchone()
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        if not deleted_contact:
+            raise HTTPException(status_code=404, detail="Contact not found")
+
+        return {
+            "success": True,
+            "message": "Contact deleted successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error deleting contact: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error deleting contact"
+        )
+        
 # Financial Requests APIs
 @app.post("/api/financial-requests")
 async def submit_financial_request(form: FinancialRequestForm):
