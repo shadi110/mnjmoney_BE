@@ -2,14 +2,11 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-import psycopg2
+import psycopg
+from psycopg.rows import dict_row
 import os
-from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 import time
-
-# Load environment variables
-load_dotenv()
 
 
 # Database connection with retry logic
@@ -24,9 +21,9 @@ def get_db_connection():
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            conn = psycopg2.connect(
+            conn = psycopg.connect(
                 database_url,
-                sslmode='require' if 'render.com' in database_url else 'prefer'
+                sslmode='require'  # Always use SSL in production
             )
             print("✅ Successfully connected to PostgreSQL database")
             return conn
@@ -189,7 +186,7 @@ async def get_contacts(
 ):
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
+        cur = conn.cursor(row_factory=dict_row)
 
         query = """
                 SELECT id, name, email, message, created_at
@@ -211,25 +208,19 @@ async def get_contacts(
         contacts = cur.fetchall()
 
         cur.execute(count_query, params[:3] if search else [])
-        total = cur.fetchone()[0]
+        total = cur.fetchone()["count"]
 
         cur.close()
         conn.close()
 
-        contact_list = []
+        # Convert datetime objects to ISO format strings
         for contact in contacts:
-            contact_list.append({
-                "id": contact[0],
-                "name": contact[1],
-                "email": contact[2],
-                "message": contact[3],
-                "created_at": contact[4].isoformat()
-            })
+            contact["created_at"] = contact["created_at"].isoformat()
 
         return {
             "success": True,
             "total": total,
-            "contacts": contact_list
+            "contacts": contacts
         }
 
     except Exception as e:
@@ -244,7 +235,7 @@ async def get_contacts(
 async def get_contact(contact_id: int):
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
+        cur = conn.cursor(row_factory=dict_row)
 
         cur.execute(
             "SELECT id, name, email, message, created_at FROM contact_us WHERE id = %s",
@@ -259,13 +250,8 @@ async def get_contact(contact_id: int):
         if not contact:
             raise HTTPException(status_code=404, detail="Contact not found")
 
-        return {
-            "id": contact[0],
-            "name": contact[1],
-            "email": contact[2],
-            "message": contact[3],
-            "created_at": contact[4].isoformat()
-        }
+        contact["created_at"] = contact["created_at"].isoformat()
+        return contact
 
     except HTTPException:
         raise
@@ -275,5 +261,3 @@ async def get_contact(contact_id: int):
             status_code=500,
             detail="Error fetching contact"
         )
-
-# NOTHING BELOW THIS LINE - THE UVICORN.RUN BLOCK IS DELETED
