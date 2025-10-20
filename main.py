@@ -678,62 +678,7 @@ def hash_password(password: str) -> str:
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
-
-# Admin Users APIs
-@app.post("/api/admin-users", response_model=AdminUserResponse)
-async def create_admin_user(user: AdminUserCreate):
-    if not all([user.username.strip(), user.email.strip(), user.password.strip(), user.full_name.strip()]):
-        raise HTTPException(status_code=400, detail="All fields are required")
     
-    if len(user.password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long")
-
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor(row_factory=dict_row)
-
-        # Check if username or email already exists
-        cur.execute(
-            "SELECT id FROM admin_users WHERE username = %s OR email = %s",
-            (user.username.strip(), user.email.strip())
-        )
-        existing_user = cur.fetchone()
-        if existing_user:
-            raise HTTPException(status_code=400, detail="Username or email already exists")
-
-        # Hash password and create user
-        password_hash = hash_password(user.password)
-        
-        cur.execute(
-            """
-            INSERT INTO admin_users (username, email, password_hash, full_name)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id, username, email, full_name, is_active, created_at, updated_at
-            """,
-            (user.username.strip(), user.email.strip(), password_hash, user.full_name.strip())
-        )
-
-        new_user = cur.fetchone()
-        conn.commit()
-
-        cur.close()
-        conn.close()
-
-        # Convert datetime objects to ISO format strings
-        new_user["created_at"] = new_user["created_at"].isoformat()
-        new_user["updated_at"] = new_user["updated_at"].isoformat()
-
-        return new_user
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Error creating admin user: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Error creating admin user"
-        )
-
 @app.get("/api/admin-users", response_model=AdminUsersListResponse)
 async def get_admin_users(
     limit: Optional[int] = Query(100, ge=1, le=1000),
