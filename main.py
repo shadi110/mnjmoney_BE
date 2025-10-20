@@ -8,6 +8,7 @@ import os
 from contextlib import asynccontextmanager
 import time
 from datetime import datetime
+import bcrypt
 
 
 # Database connection with retry logic
@@ -125,6 +126,33 @@ def create_tables():
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                     ''')
+        # Admin Users table
+        cur.execute('''
+                    CREATE TABLE IF NOT EXISTS admin_users
+                    (
+                        id
+                        SERIAL
+                        PRIMARY
+                        KEY,
+                        username
+                        VARCHAR
+                    (
+                        50
+                    ) UNIQUE NOT NULL,
+                        email VARCHAR
+                    (
+                        100
+                    ) UNIQUE NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        full_name VARCHAR
+                    (
+                        100
+                    ) NOT NULL,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
 
         conn.commit()
         cur.close()
@@ -160,7 +188,31 @@ class FinancialRequestForm(BaseModel):
     full_name: str
     phone_number: str
     email_address: str
+class AdminUserCreate(BaseModel):
+    username: str
+    email: str
+    password: str
+    full_name: str
 
+class AdminUserUpdate(BaseModel):
+    email: Optional[str] = None
+    password: Optional[str] = None
+    full_name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class AdminUserResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    full_name: str
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+class AdminUsersListResponse(BaseModel):
+    success: bool
+    total: int
+    admin_users: List[AdminUserResponse]
 
 class ContactResponse(BaseModel):
     id: int
@@ -617,6 +669,169 @@ async def delete_financial_request(request_id: int):
             detail="Error deleting financial request"
         )
 
+
+# Password hashing utilities
+def hash_password(password: str) -> str:
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+    return hashed.decode('utf-8')
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+
+# Admin Users APIs
+@app.post("/api/admin-users", response_model=AdminUserResponse)
+async def create_admin_user(user: AdminUserCreate):
+    if not all([user.username.strip(), user.email.strip(), user.password.strip(), user.full_name.strip()]):
+        raise HTTPException(status_code=400, detail="All fields are required")
+    
+    if len(user.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long")
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(row_factory=dict_row)
+
+        # Check if username or email already exists
+        cur.execute(
+            "SELECT id FROM admin_users WHERE username = %s OR email = %s",
+            (user.username.strip(), user.email.strip())
+        )
+        existing_user = cur.fetchone()
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Username or email already exists")
+
+        # Hash password and create user
+        password_hash = hash_password(user.password)
+        
+        cur.execute(
+            """
+            INSERT INTO admin_users (username, email, password_hash, full_name)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id, username, email, full_name, is_active, created_at, updated_at
+            """,
+            (user.username.strip(), user.email.strip(), password_hash, user.full_name.strip())
+        )
+
+        new_user = cur.fetchone()
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        # Convert datetime objects to ISO format strings
+        new_user["created_at"] = new_user["created_at"].isoformat()
+        new_user["updated_at"] = new_user["updated_at"].isoformat()
+
+        return new_user
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error creating admin user: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error creating admin user"
+        )
+
+@app.get("/api/admin-users", response_model=AdminUsersListResponse)
+async def get_admin_users(
+    limit: Optional[int] = Query(100, ge=1, le=1000),
+    offset: Optional[int] = Query(0, ge=0),
+    search: Optional[str] = Query(None),
+    active_only: Optional[bool] = Query(True)
+):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(row_factory=dict_row)
+
+        query = """
+                SELECT id, username, email, full_name, is_active, created_at, updated_at
+                FROM admin_users
+                """
+        count_query = "SELECT COUNT(*) FROM admin_users"
+        params = []
+
+        where_conditions = []
+
+        if active_only:
+            where_conditions.append("is_active = TRUE")
+
+        if search:
+            search_term = f"%{search}%"
+            where_conditions.append("(username ILIKE %s OR email ILIKE %s OR full_name ILIKE %s)")
+            params.extend([search_term, search_term, search_term])
+
+        if where_conditions:
+            where_clause = " WHERE " + " AND ".join(where_conditions)
+            query += where_clause
+            count_query += where_clause
+
+        query += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
+
+        cur.execute(query, params)
+        admin_users = cur.fetchall()
+
+        cur.execute(count_query, params[:len(params) - 2] if where_conditions else [])
+        total = cur.fetchone()["count"]
+
+        cur.close()
+        conn.close()
+
+        # Convert datetime objects to ISO format strings
+        for user in admin_users:
+            user["created_at"] = user["created_at"].isoformat()
+            user["updated_at"] = user["updated_at"].isoformat()
+
+        return {
+            "success": True,
+            "total": total,
+            "admin_users": admin_users
+        }
+
+    except Exception as e:
+        print(f"❌ Error fetching admin users: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error fetching admin users list"
+        )
+
+@app.get("/api/admin-users/{user_id}", response_model=AdminUserResponse)
+async def get_admin_user(user_id: int):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(row_factory=dict_row)
+
+        cur.execute(
+            """
+            SELECT id, username, email, full_name, is_active, created_at, updated_at
+            FROM admin_users
+            WHERE id = %s
+            """,
+            (user_id,)
+        )
+
+        admin_user = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        if not admin_user:
+            raise HTTPException(status_code=404, detail="Admin user not found")
+
+        admin_user["created_at"] = admin_user["created_at"].isoformat()
+        admin_user["updated_at"] = admin_user["updated_at"].isoformat()
+        return admin_user
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error fetching admin user: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error fetching admin user"
+        )
 
 # Statistics endpoint
 @app.get("/api/statistics")
